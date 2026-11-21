@@ -1,38 +1,96 @@
-"""news-image-20261120 entry (Python 3.13, standard library only).
+#!/usr/bin/env python3
+"""THE WORLD IN ONE DAY -- Friday 20 November 2026 (v2).
 
-The entry image is the entry.png beside this file, and the program copies
-it to /output/entry.png. The gate takes a whole PNG or JPEG of at most
-1 MiB and 1024 by 1024 pixels, and the judge sees exactly the bytes copied.
+Entrypoint for the news-image entry. The front page is rendered once,
+by hand, from build/front.html into entry.png (1024x1024, under 1 MiB).
+This program does the only thing the competition run needs: copy that
+pre-rendered image -- the entry.png sitting beside this file in the
+repo root -- to /output/entry.png, after checking it is a real PNG of
+the right size and dimensions.
 
-Deterministic: a pure byte copy, no network, no timestamps, no randomness.
-Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-    mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+No network, no randomness, no timestamps: running it twice writes
+byte-identical output.
 """
-
+import hashlib
 import os
 import shutil
 import struct
 import sys
-from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-OUT = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-OUT.mkdir(parents=True, exist_ok=True)
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(HERE, "entry.png")
+DST = "/output/entry.png"
+MAX_BYTES = 1024 * 1024  # competition cap: image <= 1 MiB
+WANT_W, WANT_H = 1024, 1024
 
-SRC = HERE / "entry.png"
-DST = OUT / "entry.png"
-shutil.copyfile(SRC, DST)
 
-# Self-check: the copy must be a whole PNG, at most 1024x1024 and 1 MiB,
-# or the entry would fail the gate. Fail loudly instead of shipping a
-# corrupt file.
-data = DST.read_bytes()
-if data[:8] != b"\x89PNG\r\n\x1a\n":
-    sys.exit("entry.png is not a PNG")
-width, height = struct.unpack(">II", data[16:24])
-if width > 1024 or height > 1024:
-    sys.exit(f"entry.png is {width}x{height}, over the 1024 cap")
-if len(data) > 1048576:
-    sys.exit(f"entry.png is {len(data)} bytes, over the 1 MiB cap")
-print(f"wrote {DST} ({width}x{height}, {len(data)} bytes)")
+def png_size(path):
+    """Return (width, height) read from the PNG IHDR chunk."""
+    with open(path, "rb") as fh:
+        head = fh.read(33)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG file: %s" % path)
+    if head[12:16] != b"IHDR":
+        raise ValueError("missing IHDR chunk: %s" % path)
+    width, height = struct.unpack(">II", head[16:24])
+    return width, height
 
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def png_has_iend(path):
+    """True if the file ends with a well-formed IEND chunk.
+
+    A render that was cut short still has a valid PNG header and IHDR,
+    so the header check alone would pass a truncated file. The IEND
+    trailer (12 bytes: zero length, type "IEND", CRC 0xAE426082) only
+    exists when the encoder finished the whole image.
+    """
+    with open(path, "rb") as fh:
+        fh.seek(-12, os.SEEK_END)
+        tail = fh.read(12)
+    return (len(tail) == 12 and tail[:4] == b"\x00\x00\x00\x00"
+            and tail[4:8] == b"IEND"
+            and tail[8:12] == b"\xaeB`\x82")
+
+
+def main():
+    if not os.path.exists(SRC):
+        print("missing source image: %s" % SRC, file=sys.stderr)
+        return 1
+    size = os.path.getsize(SRC)
+    if size > MAX_BYTES:
+        print("entry.png too large: %d bytes > %d" % (size, MAX_BYTES),
+              file=sys.stderr)
+        return 1
+    width, height = png_size(SRC)
+    if (width, height) != (WANT_W, WANT_H):
+        print("wrong dimensions: %dx%d, want %dx%d"
+              % (width, height, WANT_W, WANT_H), file=sys.stderr)
+        return 1
+    if not png_has_iend(SRC):
+        print("truncated PNG: missing IEND trailer: %s" % SRC,
+              file=sys.stderr)
+        return 1
+    os.makedirs(os.path.dirname(DST), exist_ok=True)
+    shutil.copyfile(SRC, DST)
+    # Post-copy check: the output must be byte-identical to the source.
+    # A silent short write or a stale /output would otherwise pass.
+    if sha256(DST) != sha256(SRC):
+        print("output mismatch after copy: %s != %s" % (DST, SRC),
+              file=sys.stderr)
+        return 1
+    print("entry.png: %d bytes, %dx%d, sha256 %s"
+          % (size, width, height, sha256(DST)))
+    print("wrote %s" % DST)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
